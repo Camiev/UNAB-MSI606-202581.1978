@@ -1,0 +1,33 @@
+{
+    "Equipo azul": {
+        "color": "azul",
+        "miembros": [
+            "lorca",
+            "ronaldo",
+            "messi",
+            "principe",
+            "pato",
+            "superman",
+            "sapito"
+        ]
+    },
+    "Equipo rojo": {
+        "color": "rojo",
+        "miembros": [
+            "lammer",
+            "vitoco",
+            "yaser",
+            "vidal",
+            "tanque",
+            "caseli",
+            "chupete"
+        ]
+    },
+    "Arbitro": {
+        "color": "negro",
+        "miembros": [
+            "cin",
+            "cami"
+        ]
+    }
+}
