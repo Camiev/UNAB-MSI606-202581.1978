@@ -4,49 +4,43 @@ from ultralytics import YOLO
 import json
 import os
 
-# ========= CONFIGURACIÓN DE EQUIPOS Y COLORES =========
-# Archivo donde el bot guarda la configuración de los equipos
+# ========= CONFIGURACIÓN =========
 EQUIPOS_FILE = "equipos.json"
-
-# Umbral mínimo de píxeles para considerar un color
 UMBRAL_COBERTURA = 0.08
-
-# Kernel para limpieza morfológica
 KERNEL = cv.getStructuringElement(cv.MORPH_ELLIPSE, (5,5))
 
+# Rangos HSV solo para rojo, azul y negro
+RANGOS_BASE = {
+    "rojo": [
+        ((0,   90, 60), (10, 255, 255)),
+        ((170, 90, 60), (179, 255, 255)),
+    ],
+    "azul": [
+        ((95,  80, 60), (125, 255, 255)),
+    ],
+    "negro": [
+        ((0,   0, 0),   (179, 80, 80)),
+    ],
+}
+
 def cargar_rangos_equipos():
-    """Carga los datos de los equipos desde el archivo JSON."""
     if not os.path.exists(EQUIPOS_FILE):
-        print("Error: El archivo de equipos 'equipos.json' no se encontró. No se puede cargar la configuración.")
+        print("Error: no existe equipos.json")
         return {}
-    
-    with open(EQUIPOS_FILE, "r") as f:
+
+    with open(EQUIPOS_FILE, "r", encoding="utf-8") as f:
         equipos_data = json.load(f)
 
     team_ranges = {}
     for nombre_equipo, datos in equipos_data.items():
-        color = datos["color"].lower()
-        if "rojo" in color:
-            team_ranges[nombre_equipo] = [
-                ((0,   90, 60), (10, 255, 255)),   # rojos bajos
-                ((170, 90, 60), (179, 255, 255)),  # rojos altos
-            ]
-        elif "azul" in color:
-            team_ranges[nombre_equipo] = [
-                ((95,  80, 60), (125, 255, 255)),
-            ]
-        elif "negro" in color or "arbitro" in color:
-             team_ranges[nombre_equipo] = [
-                ((0,   0, 0),   (179, 80, 80)),
-            ]
+        color = datos.get("color", "").lower()
+        if color in RANGOS_BASE:
+            team_ranges[nombre_equipo] = RANGOS_BASE[color]
         else:
-            print(f"Advertencia: No hay rangos HSV definidos para el color '{color}' del equipo '{nombre_equipo}'.")
-
+            print(f"Advertencia: color '{color}' no mapeado en '{nombre_equipo}'")
     return team_ranges
 
-# --- TUS FUNCIONES DE CLASIFICACIÓN DE COLOR ---
 def coverage_for_ranges(hsv_roi, ranges):
-    """Calcula la cobertura de color dentro de un rango HSV dado."""
     total_mask = np.zeros(hsv_roi.shape[:2], dtype=np.uint8)
     for low, high in ranges:
         low = np.array(low, dtype=np.uint8)
@@ -57,85 +51,74 @@ def coverage_for_ranges(hsv_roi, ranges):
         total_mask = cv.bitwise_or(total_mask, mask)
     return (total_mask > 0).mean()
 
-# --- FUNCIÓN PRINCIPAL ---
 def main():
-    # Cargar el modelo YOLOv8 pre-entrenado
-    yolo_model = YOLO("yolov8n-seg.pt") 
-    
-    # Cargar los rangos de colores de los equipos desde el archivo
+    cap = cv.VideoCapture(0)  # cámbialo por "video.mp4" si quieres archivo
+    if not cap.isOpened():
+        print("Error: no se pudo abrir cámara/video")
+        return
+
+    yolo_model = YOLO("yolov8n-seg.pt")
     TEAM_RANGES = cargar_rangos_equipos()
     if not TEAM_RANGES:
         return
 
-    # --- CONFIGURACIÓN DE CÁMARA ---
-    CAM_INDEX = 0 
-    cap = cv.VideoCapture(CAM_INDEX)
-    
-    if not cap.isOpened():
-        print(f"Error: No se pudo abrir la cámara con índice {CAM_INDEX}.")
-        return
-
-    print(f"Cámara con índice {CAM_INDEX} abierta correctamente.")
-    
     while True:
         ok, frame = cap.read()
         if not ok:
-            print("Error: Frame no disponible. Saliendo.")
             break
-        
+
         results = yolo_model(frame, classes=[0], verbose=False)
-
         for r in results:
+            if r.masks is None:
+                continue
+
             boxes = r.boxes
-            for box in boxes:
+            masks = r.masks.data.cpu().numpy()
+            H, W = frame.shape[:2]
+
+            for i, box in enumerate(boxes):
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                
-                w_p, h_p = x2 - x1, y2 - y1
-                torso_x1 = int(x1 + w_p * 0.3)
-                torso_x2 = int(x1 + w_p * 0.7)
-                torso_y1 = int(y1 + h_p * 0.35)
-                torso_y2 = int(y1 + h_p * 0.75)
+                mask_i = (masks[i] > 0.5).astype(np.uint8) * 255
+                if mask_i.shape[0] != H or mask_i.shape[1] != W:
+                    mask_i = cv.resize(mask_i, (W, H), interpolation=cv.INTER_NEAREST)
 
-                torso_x1 = max(0, torso_x1)
-                torso_y1 = max(0, torso_y1)
-                torso_x2 = min(frame.shape[1], torso_x2)
-                torso_y2 = min(frame.shape[0], torso_y2)
-
-                roi_bgr = frame[torso_y1:torso_y2, torso_x1:torso_x2]
-                
+                # ROI = torso 35%-75% de la caja
+                h_box = y2 - y1
+                ty1 = int(y1 + 0.35 * h_box)
+                ty2 = int(y1 + 0.75 * h_box)
+                tx1 = int(x1 + 0.3 * (x2 - x1))
+                tx2 = int(x1 + 0.7 * (x2 - x1))
+                roi_mask = mask_i[ty1:ty2, tx1:tx2]
+                roi_bgr = frame[ty1:ty2, tx1:tx2]
                 if roi_bgr.size == 0:
                     continue
-                
-                roi_bgr = cv.GaussianBlur(roi_bgr, (5,5), 0)
-                hsv = cv.cvtColor(roi_bgr, cv.COLOR_BGR2HSV)
-                
+
+                roi_bgr = cv.bitwise_and(roi_bgr, roi_bgr, mask=roi_mask)
+                hsv = cv.cvtColor(cv.GaussianBlur(roi_bgr, (5,5), 0), cv.COLOR_BGR2HSV)
+
                 coberturas = {}
                 for team, rangos in TEAM_RANGES.items():
                     cov = coverage_for_ranges(hsv, rangos)
                     coberturas[team] = cov
 
-                best_team, best_cov = max(coberturas.items(), key=lambda kv: kv[1]) if coberturas else ("Desconocido", 0.0)
+                best_team, best_cov = max(coberturas.items(), key=lambda kv: kv[1]) if coberturas else ("Desconocido", 0)
+                if best_cov < UMBRAL_COBERTURA:
+                    best_team = "Sin certeza"
 
-                color_caja = (255, 255, 255)
-                if best_cov >= UMBRAL_COBERTURA:
-                    texto = f"{best_team}"
-                    if "rojo" in best_team.lower():
-                        color_caja = (0, 0, 255)
-                    elif "azul" in best_team.lower():
-                        color_caja = (255, 0, 0)
-                    elif "negro" in best_team.lower() or "arbitro" in best_team.lower():
-                        color_caja = (0, 255, 255)
-                else:
-                    texto = "Sin certeza"
-                    color_caja = (0, 0, 0)
+                color_caja = (255,255,255)
+                if "rojo" in best_team.lower():
+                    color_caja = (0,0,255)
+                elif "azul" in best_team.lower():
+                    color_caja = (255,0,0)
+                elif "arbitro" in best_team.lower() or "negro" in best_team.lower():
+                    color_caja = (0,0,0)
 
-                cv.rectangle(frame, (x1, y1), (x2, y2), color_caja, 2)
-                cv.putText(frame, texto, (x1, y1 - 10), cv.FONT_HERSHEY_SIMPLEX, 0.7, color_caja, 2, cv.LINE_AA)
-        
-        cv.imshow("Clasificador de Equipos de Futbol", frame)
+                cv.rectangle(frame, (x1,y1), (x2,y2), color_caja, 2)
+                cv.putText(frame, f"{best_team}", (x1,y1-10),
+                           cv.FONT_HERSHEY_SIMPLEX, 0.7, color_caja if color_caja!=(0,0,0) else (255,255,255), 2)
 
-        key = cv.waitKey(1) & 0xFF
-        if key == 27:
+        cv.imshow("Clasificador 3 equipos", frame)
+        if cv.waitKey(1) & 0xFF == 27:
             break
 
     cap.release()
