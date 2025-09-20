@@ -2,4 +2,4 @@
 
 Ejecutar con
 
-```python3 camisasv3.py```
+```python3 equipos_por_color.py```
